@@ -1,0 +1,38 @@
+.terraform/
+*.tfstate*
+*.tfplan
+terraform.tfvars
+matcher.zip
+__pycache__/
+
+# Terraform local files and state
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+
+# Python environment and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Credentials and local settings
+.aws/
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+credentials
+*.pem
+*.key
+
+# Generated packages and backups
+*.zip
+*.backup
+*.bak
