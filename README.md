@@ -1,85 +1,164 @@
-# CCDL Exchange: development infrastructure starter
+# CCDL Exchange Engine
 
-Targets WSL Ubuntu 24.04 and AWS ap-south-1. This is an infrastructure scaffold, not a completed matching engine or financial ledger. Nothing has been deployed by the author. The accompanying PCAP PDF concerns an unrelated ALM/HPC project; this scaffold follows the written CCDL requirements.
+A development trade-matching demo built with Python, AWS serverless services,
+Terraform, and a local Streamlit dashboard.
 
-## Included
+Project location: Manipal, India.
+AWS deployment region: Asia Pacific (Sydney), `ap-southeast-2`.
+Local development environment: WSL Ubuntu 24.04.
 
-- Exchange_OrderBook: string OrderID partition key, PAY_PER_REQUEST.
-- Exchange_TradeHistory: string TradeID partition key, PAY_PER_REQUEST.
-- Point-in-time recovery and deletion protection on both tables; DynamoDB default encryption at rest.
-- One encrypted FIFO order queue for both sides, grouped by instrument, and a FIFO dead-letter queue (DLQ).
-- 30-second Lambda timeout, 180-second visibility timeout, batch size 1, concurrency capped at 2 at the event source, partial batch failure reporting.
-- Scoped execution role: consume only this order queue; read/write orders; read/insert trades; write only this function's logs. No Scan, table deletion, or trade-update permissions. PutItem still needs an attribute_not_exists condition in application code to prevent overwrites.
-- Four-day source retention, fourteen-day DLQ retention, five receives before redrive; TLS-only SQS policies.
-- Fourteen-day CloudWatch logs and a DLQ alarm. The alarm has no notification destination; attach an SNS topic/subscription before relying on alerts.
-- Environment=Dev and Project=CCDL-Exchange via provider default tags on resources that support tags. Inline policies and queue policies do not have independent tags.
+## Implemented features
 
-Lambda's event source mapping performs the polling. The handler processes the delivered event; it must not implement a separate ReceiveMessage loop. No aws_lambda_permission is necessary for this SQS pull integration.
+- Price-time priority matching with partial and multiple fills.
+- Atomic persistence of matching results using DynamoDB transactions.
+- Duplicate order detection and idempotent cancellation commands.
+- IAM-authenticated API endpoints for orders and cancellations.
+- FIFO command queueing grouped by instrument symbol.
+- Dashboard for submitting commands and viewing orders, books, and trades.
+- Infrastructure managed with Terraform.
+- Git version history and a private GitHub repository.
+- GitHub Actions checks for Python tests and Terraform formatting and validation.
+
+## Architecture
+
+The local Streamlit dashboard sends signed requests to API Gateway.
+An intake Lambda validates and queues commands in SQS.
+The matching Lambda processes those commands and persists results in DynamoDB.
+CloudWatch records execution logs.
+
+Dashboard reads use the local operator's AWS credentials to access DynamoDB.
+
+## Scope
+
+This is a development demonstration, not a production financial exchange.
+Trade history records executions; it is not a complete cash or asset ledger.
+The project does not implement funding, settlement, margin, or market-data feeds.
+
+Instrument symbols can represent stocks or commodities in demonstrations.
+Real instruments require defined tick sizes, lot sizes, and trading rules.
+
+## Included infrastructure
+
+- DynamoDB Exchange_OrderBook with string partition key OrderID.
+- DynamoDB Exchange_TradeHistory with string partition key TradeID.
+- On-demand billing, point-in-time recovery, and deletion protection on both tables.
+- Encrypted FIFO command queue and dead-letter queue, with TLS-only queue policies.
+- Commands grouped by instrument symbol for FIFO processing.
+- Matching Lambda with a 30-second timeout, 180-second queue visibility timeout,
+  batch size 1, event-source maximum concurrency 2, and partial batch responses.
+- API Gateway routes POST /orders and POST /cancellations using AWS_IAM authorization.
+- Separate intake Lambda that validates commands and sends them to SQS.
+- Scoped execution roles for the intake and matching functions.
+- Four-day source queue retention, fourteen-day DLQ retention, and redrive after
+  five receives.
+- Fourteen-day CloudWatch log retention and a DLQ alarm. The alarm has no
+  notification destination configured.
+- Default tags Environment=Dev and Project=CCDL-Exchange on supported resources.
+
+Lambda's SQS event source mapping polls the queue and invokes the matching
+handler. API Gateway invokes the intake Lambda through explicit Lambda
+permissions.
+
+The matching engine uses conditional writes and DynamoDB transactions to
+persist order changes, book versions, and trade records atomically.
 
 ## Run from WSL
 
-Install Terraform >=1.6,<2 and AWS CLI v2 using the official instructions linked below. Python 3 is needed for local tests. Unzip into the Linux filesystem, for example ~/projects/ccdl-exchange. Configure a development AWS profile with provisioning permissions; runtime IAM permissions in this project are not provisioning permissions.
+Use AWS CLI v2, Python, and Terraform. CI uses Python 3.12 and
+Terraform 1.17.1. Configure AWS credentials separately; never place
+access keys in source files.
+
+The current development deployment uses Sydney, ap-southeast-2.
+Use an AWS profile authorized for the intended account. If using a named
+profile, set AWS_PROFILE to its name before running these commands.
 
 ```bash
 cd ~/projects/ccdl-exchange
-export AWS_PROFILE=ccdl-dev
-export AWS_DEFAULT_REGION=ap-south-1
-aws configure sso --profile ccdl-dev   # One-time setup if your organization uses IAM Identity Center
-aws sso login --profile ccdl-dev
+export AWS_DEFAULT_REGION=ap-southeast-2
 aws sts get-caller-identity
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -v -p 'test_*.py'
 terraform init
-terraform fmt -check
+terraform fmt -check -recursive
 terraform validate
-python3 -m unittest discover -p 'test_*.py'
 terraform plan -out=dev.tfplan
-# Inspect the plan and target account before creating billable resources:
+```
+
+For a fresh checkout, create the virtual environment with
+`python3 -m venv .venv` before activating it.
+
+Review the target account and the complete plan before deploying:
+
+```bash
 terraform apply dev.tfplan
 ```
 
-If you use another credential method, omit the SSO commands and configure that profile appropriately. Never put access keys into .tf files. The dependency lock file pins provider selections; commit it. Exact table names mean only one deployment per account/region using these names. Existing tables must be imported and reconciled rather than recreated.
+Terraform uses local state in this development setup. Preserve the existing
+state when managing the deployed resources. A fresh clone does not contain
+that state and must not be used to recreate an existing deployment blindly.
+Keep state, plans, credentials, and virtual environments out of Git.
 
-State defaults to local storage. Before collaborative use, configure a separately provisioned, versioned, encrypted S3 backend with restricted access and state locking; do not commit state or plan files. This starter does not provision the backend. For S3 use_lockfile, use a Terraform version that supports it (>=1.10).
+Before team use, configure a separately provisioned remote backend with
+encryption, versioning, restricted access, and state locking.
 
-## Safe default and test message
+## Order processing
 
-The event source mapping is DISABLED by default. The placeholder handler returns every order as failed and never writes to DynamoDB. It deliberately does not manufacture trades or acknowledge unfinished work. Do not enable it for live orders; messages expire even while processing is disabled. If enabled with the placeholder, messages will eventually move to the DLQ.
+The Python handler implements order intake, matching, and cancellation.
+The enable_processing variable controls the SQS event source mapping;
+its default is false for a fresh configuration.
 
-A producer needs sqs:SendMessage on the orders_queue_arn output. Producer IAM is not created because no producer identity was supplied. Example for a separately authorized development producer:
+For an intentional development deployment with processing enabled, create
+a local processing.auto.tfvars file containing:
 
-```bash
-aws sqs send-message \
-  --queue-url "$(terraform output -raw orders_queue_url)" \
-  --message-group-id "TEST-INSTRUMENT" \
-  --message-deduplication-id "order-0001" \
-  --message-body '{"OrderID":"order-0001","Symbol":"TEST-INSTRUMENT","Side":"BUY","PriceTicks":12500,"QuantityLots":10}'
+```hcl
+enable_processing = true
 ```
 
-This only verifies enqueueing. There will be no trade or order row with the stub. Use a stable command ID as the deduplication ID on retries and a new ID for a new command. Amend/cancel commands need their own command IDs even when referencing the same OrderID. Validate that the producer's MessageGroupId equals the payload symbol in the eventual handler. Do not trust client-supplied account identity or ordering timestamps.
+Review a new Terraform plan and apply it. This local variable file is
+excluded from Git. Queued messages can expire while processing is disabled.
 
-Implement process_order in lambda/handler.py and add integration tests before enabling:
+Commands for the same symbol use the same FIFO message group. The handler
+reports failed and unprocessed records through partial batch responses.
+Order retries must preserve the original OrderID and payload. Cancellation
+retries must preserve the CommandID and payload.
+
+A QUEUED API response confirms enqueueing, not completed execution.
+Check the saved order state and CloudWatch logs for the result.
+
+## Local dashboard
+
+With the virtual environment active and AWS credentials configured:
 
 ```bash
-terraform plan -var='enable_processing=true' -out=enable.tfplan
-# Review after implementing and testing the engine:
-terraform apply enable.tfplan
+python -m streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
 ```
 
-## Matching and financial correctness requirements
+Open http://localhost:8501. The dashboard runs locally and uses operator
+AWS credentials. It is not a public multi-user trading application.
 
-1. Queue ordering: both buy and sell orders for one symbol must use the SAME MessageGroupId. Parallelism is across symbols; a hot symbol remains sequential. SQS arrival order is not necessarily the same as client timestamp order. A single symbol cannot scale just by adding Lambda concurrency.
-2. Retries: FIFO deduplication is bounded, and Lambda/SQS processing can repeat. Persist command identity and payload fingerprint atomically with effects; verify duplicate payloads, reject reused IDs with conflicting content. An in-memory seen set or short-lived transaction token alone is insufficient. A crash after committing but before acknowledgement must not create another trade.
-3. Atomicity: use TransactWriteItems for related order changes, deterministic trade IDs, and idempotency markers with conditional version checks. Do not acknowledge until all required effects are committed. The role grants underlying PutItem/UpdateItem/ConditionCheckItem operations used by transactions. Large multi-fill orders require a designed, recoverable continuation protocol; one transaction cannot cover arbitrary work.
-4. Access model: OrderID alone supports point lookup, not efficient best-price/oldest-order lookup. Do not Scan on every message. Design the authoritative per-symbol price-time book before implementing matching. A GSI can support discovery, but eventual consistency means it cannot by itself establish authoritative best-price ordering. This scaffold intentionally adds no speculative indexes or Query permissions.
-5. Durable state: Lambda memory can disappear and cannot be the authoritative book. Define recovery/replay, checkpoints, sequencing and conditional commit behavior. Adopt integer ticks/lots or precise decimal rules; avoid binary floating point for money.
-6. Ledger scope: TradeHistory is an execution record, not a double-entry ledger. Account balances, holds/reservations, settlement, balanced postings, reconciliation and audit retention require an additional explicit data model. These are not implemented or claimed by these two tables.
-7. DLQ ordering: this development scaffold favors isolating poison messages. Removing a failed FIFO command to the DLQ allows later commands to run, breaking strict end-to-end command order. A strict exchange needs durable sequence-gap detection and a per-symbol halt/reconciliation procedure BEFORE processing subsequent commands. A CloudWatch alarm alone is not such a mechanism. Do not blindly redrive old orders into a live market.
-8. Enablement tests: duplicate delivery after commit, conflicting duplicate payload, competing fills, partial fills, insufficient funds, cancel/fill races, crash/replay, sequence gaps and DLQ recovery. Test against AWS in an isolated account; unit tests here cover only acknowledgement behavior.
+The displayed project location is Manipal, India; AWS resources remain
+in Sydney. Prices and quantities are expressed in integer ticks and lots.
 
-## Python or C++ integration
+## Tests and continuous integration
 
-Python: replace the stub, package pinned application dependencies with the deployment, and preserve the partial-batch response contract. The current archive contains only the handler.
+```bash
+python -m unittest discover -v -p 'test_*.py'
+```
 
-C++: build a Lambda-compatible custom runtime (for example provided.al2023) or container image for the selected architecture; Ubuntu-built binaries are not automatically ABI-compatible with Lambda. Change the Terraform packaging/runtime fields accordingly. An ordinary C++ executable cannot simply replace handler.py.
+GitHub Actions runs the backend unit tests, Terraform formatting checks,
+and Terraform validation on pushes to main and pull requests.
+It also supports manual execution.
+
+CI uses dummy AWS credential values for mocked tests. It does not deploy
+resources or verify the live AWS environment. Live demonstrations have
+separately exercised matching, cancellation, retries, and dashboard commands.
+
+## Implementation language
+
+The deployed engine uses Python. A C++ implementation is a possible future
+extension and would require compatible Lambda packaging, runtime configuration,
+and tests preserving the command and persistence contracts.
 
 ## Operations and cleanup
 
